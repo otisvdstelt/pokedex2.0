@@ -1,0 +1,1 @@
+Pokédex made whit https://pokeapi.co/ 
