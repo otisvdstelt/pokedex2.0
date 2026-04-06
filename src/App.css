@@ -13,7 +13,7 @@
   --accent-yellow: #ebc04f;
 
   width: min(1240px, 96vw);
-  margin: clamp(84px, 14vh, 160px) auto 18px;
+  margin: clamp(68px, 11vh, 132px) auto 18px;
   color: var(--ink);
 }
 
