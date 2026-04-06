@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import startupSound from './assets/sound/startup.mp3'
 
 const BATCH_SIZE = 60
 const SEARCH_LIMIT = 48
@@ -93,9 +94,18 @@ function App() {
   const [sortBy, setSortBy] = useState('id-asc')
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
   const [favoriteIds, setFavoriteIds] = useState(() => {
-    const stored = localStorage.getItem('pokedex-favorites')
-    return stored ? JSON.parse(stored) : []
+    try {
+      const stored = localStorage.getItem('pokedex-favorites')
+      if (!stored) return []
+
+      return [...new Set(JSON.parse(stored))]
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    } catch (error) {
+      return []
+    }
   })
+  const [hydratedFavoritePokemon, setHydratedFavoritePokemon] = useState({})
 
   const [pokemonDetails, setPokemonDetails] = useState(null)
   const [currentSprite, setCurrentSprite] = useState('front')
@@ -108,9 +118,13 @@ function App() {
   const [isSearching, setIsSearching] = useState(false)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [isDetailLoading, setIsDetailLoading] = useState(false)
+  const [cryCooldownUntil, setCryCooldownUntil] = useState(0)
+  const [cryCountdown, setCryCountdown] = useState(0)
 
   const searchInputRef = useRef(null)
   const scanTimeoutRef = useRef(null)
+  const uiAudioRef = useRef(null)
+  const startupAudioRef = useRef(null)
   const bootTimersRef = useRef([])
   const cacheRef = useRef({
     byUrl: new Map(),
@@ -131,17 +145,115 @@ function App() {
   }, [favoriteIds])
 
   useEffect(() => {
+    const audio = new Audio(startupSound)
+    audio.preload = 'auto'
+    audio.volume = 0.5
+    startupAudioRef.current = audio
+
+    return () => {
+      audio.pause()
+      audio.src = ''
+    }
+  }, [])
+
+  useEffect(() => {
+    if (cryCooldownUntil <= Date.now()) {
+      setCryCountdown(0)
+      return
+    }
+
+    const updateCountdown = () => {
+      const remaining = Math.max(0, Math.ceil((cryCooldownUntil - Date.now()) / 1000))
+      setCryCountdown(remaining)
+    }
+
+    updateCountdown()
+    const interval = setInterval(updateCountdown, 120)
+    return () => clearInterval(interval)
+  }, [cryCooldownUntil])
+
+  useEffect(() => {
     return () => {
       if (scanTimeoutRef.current) {
         clearTimeout(scanTimeoutRef.current)
       }
 
       bootTimersRef.current.forEach((timer) => clearTimeout(timer))
+
+      if (uiAudioRef.current) {
+        uiAudioRef.current.close().catch(() => {})
+      }
+
+      if (startupAudioRef.current) {
+        startupAudioRef.current.pause()
+        startupAudioRef.current.currentTime = 0
+      }
     }
   }, [])
 
+  const playStartupSound = () => {
+    try {
+      if (!startupAudioRef.current) {
+        startupAudioRef.current = new Audio(startupSound)
+        startupAudioRef.current.preload = 'auto'
+      }
+
+      startupAudioRef.current.pause()
+      startupAudioRef.current.currentTime = 0
+      startupAudioRef.current.volume = 0.5
+      startupAudioRef.current.play().catch(() => {})
+    } catch (error) {
+      // Ignore audio load/playback failures.
+    }
+  }
+
+  const playUiBeep = (type = 'tap') => {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext
+      if (!AudioContextClass) return
+
+      if (!uiAudioRef.current) {
+        uiAudioRef.current = new AudioContextClass()
+      }
+
+      const ctx = uiAudioRef.current
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {})
+      }
+
+      const tones = {
+        tap: { frequency: 920, duration: 0.04, gain: 0.028 },
+        nav: { frequency: 760, duration: 0.05, gain: 0.032 },
+        confirm: { frequency: 660, duration: 0.07, gain: 0.036 },
+        power: { frequency: 480, duration: 0.12, gain: 0.045 },
+      }
+
+      const tone = tones[type] || tones.tap
+      const now = ctx.currentTime
+      const oscillator = ctx.createOscillator()
+      const gainNode = ctx.createGain()
+
+      oscillator.type = 'square'
+      oscillator.frequency.setValueAtTime(tone.frequency, now)
+
+      gainNode.gain.setValueAtTime(0.0001, now)
+      gainNode.gain.exponentialRampToValueAtTime(tone.gain, now + 0.01)
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + tone.duration)
+
+      oscillator.connect(gainNode)
+      gainNode.connect(ctx.destination)
+
+      oscillator.start(now)
+      oscillator.stop(now + tone.duration + 0.02)
+    } catch (error) {
+      // Ignore audio API failures.
+    }
+  }
+
   const startBootSequence = () => {
     if (bootPhase !== 'off') return
+
+    playStartupSound()
 
     const bootStartDelay = 320
     const bootStepDelay = 620
@@ -214,6 +326,88 @@ function App() {
     cachePokemon(pokemon)
     return pokemon
   }
+
+  useEffect(() => {
+    let isCancelled = false
+
+    const hydrateFavoritePokemon = async () => {
+      if (!favoriteIds.length) {
+        setHydratedFavoritePokemon({})
+        return
+      }
+
+      const cachedLookup = {}
+      const missingIds = favoriteIds.filter((id) => {
+        const cachedPokemon = cacheRef.current.byId.get(String(id))
+        if (cachedPokemon) {
+          cachedLookup[id] = cachedPokemon
+          return false
+        }
+
+        return true
+      })
+
+      if (!isCancelled) {
+        setHydratedFavoritePokemon((previous) => {
+          const next = {}
+
+          favoriteIds.forEach((id) => {
+            if (cachedLookup[id]) {
+              next[id] = cachedLookup[id]
+            } else if (previous[id]) {
+              next[id] = previous[id]
+            }
+          })
+
+          const prevKeys = Object.keys(previous)
+          const nextKeys = Object.keys(next)
+          const sameLength = prevKeys.length === nextKeys.length
+          const sameEntries = sameLength && nextKeys.every((key) => previous[key] === next[key])
+
+          return sameEntries ? previous : next
+        })
+      }
+
+      if (!missingIds.length) return
+
+      const fetchedEntries = await Promise.all(
+        missingIds.map(async (id) => {
+          try {
+            const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`)
+            if (!response.ok) return null
+
+            const pokemon = await response.json()
+            cachePokemon(pokemon)
+            return [id, pokemon]
+          } catch (error) {
+            return null
+          }
+        }),
+      )
+
+      if (isCancelled) return
+
+      const fetchedLookup = Object.fromEntries(fetchedEntries.filter(Boolean))
+      if (Object.keys(fetchedLookup).length) {
+        setHydratedFavoritePokemon((previous) => {
+          const next = { ...previous, ...fetchedLookup }
+          const filtered = {}
+          favoriteIds.forEach((id) => {
+            if (next[id]) {
+              filtered[id] = next[id]
+            }
+          })
+          return filtered
+        })
+      }
+    }
+
+    hydrateFavoritePokemon()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [favoriteIds])
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -379,7 +573,38 @@ function App() {
     return () => window.removeEventListener('keydown', handleGlobalSearchShortcut)
   }, [isBootLocked])
 
-  const sourcePokemon = searchTerm.trim() ? searchResults : displayedPokemon
+  const sourcePokemon = useMemo(() => {
+    if (searchTerm.trim()) {
+      return searchResults
+    }
+
+    if (!showFavoritesOnly) {
+      return displayedPokemon
+    }
+
+    const mergedById = new Map(displayedPokemon.map((pokemon) => [pokemon.id, pokemon]))
+    Object.values(hydratedFavoritePokemon).forEach((pokemon) => {
+      if (pokemon?.id) {
+        mergedById.set(pokemon.id, pokemon)
+      }
+    })
+
+    return [...mergedById.values()].sort((a, b) => a.id - b.id)
+  }, [searchTerm, searchResults, showFavoritesOnly, displayedPokemon, hydratedFavoritePokemon])
+
+  const favoritePokemon = useMemo(() => {
+    const byId = new Map(displayedPokemon.map((pokemon) => [pokemon.id, pokemon]))
+    return favoriteIds
+      .map((id) => ({
+        id,
+        pokemon:
+          byId.get(id) ||
+          hydratedFavoritePokemon[id] ||
+          cacheRef.current.byId.get(String(id)) ||
+          null,
+      }))
+      .sort((a, b) => a.id - b.id)
+  }, [favoriteIds, displayedPokemon, hydratedFavoritePokemon])
 
   const filteredPokemon = useMemo(() => {
     const favorites = new Set(favoriteIds)
@@ -426,15 +651,22 @@ function App() {
   const toggleFavorite = (pokemonId) => {
     if (isBootLocked) return
 
+    playUiBeep('confirm')
+
+    const normalizedId = Number(pokemonId)
+    if (!Number.isInteger(normalizedId) || normalizedId <= 0) return
+
     setFavoriteIds((previous) =>
-      previous.includes(pokemonId)
-        ? previous.filter((favoriteId) => favoriteId !== pokemonId)
-        : [...previous, pokemonId],
+      previous.includes(normalizedId)
+        ? previous.filter((favoriteId) => favoriteId !== normalizedId)
+        : [...previous, normalizedId],
     )
   }
 
   const openPokemonDetails = async (pokemon) => {
     if (isBootLocked) return
+
+    playUiBeep('nav')
 
     if (scanTimeoutRef.current) {
       clearTimeout(scanTimeoutRef.current)
@@ -491,6 +723,8 @@ function App() {
     if (isBootLocked) return
     if (selectedIndex < 0 || !filteredPokemon.length) return
 
+    playUiBeep('nav')
+
     const nextIndex = (selectedIndex + direction + filteredPokemon.length) % filteredPokemon.length
     const nextPokemon = filteredPokemon[nextIndex]
     openPokemonDetails(nextPokemon)
@@ -524,28 +758,106 @@ function App() {
     if (isBootLocked) return
     if (!filteredPokemon.length) return
 
+    playUiBeep('tap')
+
     const randomPokemon = filteredPokemon[Math.floor(Math.random() * filteredPokemon.length)]
     openPokemonDetails(randomPokemon)
   }
 
   const clearFilters = () => {
     if (isBootLocked) return
+
+    playUiBeep('tap')
+
     setSearchTerm('')
     setSelectedType('all')
     setSortBy('id-asc')
     setShowFavoritesOnly(false)
   }
 
+  const handleSearchInputClick = () => {
+    if (isBootLocked) return
+
+    playUiBeep('tap')
+  }
+
+  const handleTypeChange = (event) => {
+    if (isBootLocked) return
+
+    playUiBeep('tap')
+    setSelectedType(event.target.value)
+  }
+
+  const handleSortChange = (event) => {
+    if (isBootLocked) return
+
+    playUiBeep('tap')
+    setSortBy(event.target.value)
+  }
+
+  const toggleFavoritesOnlyFilter = () => {
+    if (isBootLocked) return
+
+    playUiBeep('tap')
+    setShowFavoritesOnly((previous) => !previous)
+  }
+
+  const handleLoadMoreClick = () => {
+    if (isBootLocked) return
+
+    playUiBeep('tap')
+    loadMorePokemon()
+  }
+
+  const handleSpriteChange = (sprite) => {
+    if (isBootLocked) return
+
+    playUiBeep('tap')
+    setCurrentSprite(sprite)
+  }
+
   const playCry = () => {
     if (isBootLocked) return
+
+    const cooldownActive = Date.now() < cryCooldownUntil
+    if (cooldownActive) return
 
     const cryUrl = pokemonDetails?.cries?.latest || pokemonDetails?.cries?.legacy
     if (!cryUrl) return
 
+    setCryCooldownUntil(Date.now() + 2000)
+
     const audio = new Audio(cryUrl)
-    audio.volume = 0.65
+    audio.volume = 0.22
     audio.play().catch(() => {})
   }
+
+  const moveSet = useMemo(() => {
+    if (!pokemonDetails?.moves) return []
+
+    const parsedMoves = pokemonDetails.moves.map((moveEntry) => {
+      const levelDetails = [...(moveEntry.version_group_details || [])]
+        .filter((detail) => detail.move_learn_method.name === 'level-up')
+        .sort((a, b) => a.level_learned_at - b.level_learned_at)
+
+      const firstLevelDetail = levelDetails[0] || null
+
+      return {
+        name: formatName(moveEntry.move.name),
+        level: firstLevelDetail ? firstLevelDetail.level_learned_at : null,
+      }
+    })
+
+    return parsedMoves
+      .sort((a, b) => {
+        if (a.level === null && b.level === null) return a.name.localeCompare(b.name)
+        if (a.level === null) return 1
+        if (b.level === null) return -1
+        if (a.level !== b.level) return a.level - b.level
+        return a.name.localeCompare(b.name)
+      })
+      .slice(0, 14)
+  }, [pokemonDetails])
 
   const detailSprite =
     currentSprite === 'shiny'
@@ -586,13 +898,14 @@ function App() {
               placeholder="Search name or number"
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
+              onClick={handleSearchInputClick}
               className="search-input"
               disabled={isBootLocked}
             />
 
             <select
               value={selectedType}
-              onChange={(event) => setSelectedType(event.target.value)}
+              onChange={handleTypeChange}
               disabled={isBootLocked}
             >
               {TYPE_FILTERS.map((type) => (
@@ -602,7 +915,7 @@ function App() {
               ))}
             </select>
 
-            <select value={sortBy} onChange={(event) => setSortBy(event.target.value)} disabled={isBootLocked}>
+            <select value={sortBy} onChange={handleSortChange} disabled={isBootLocked}>
               {SORT_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
@@ -613,7 +926,7 @@ function App() {
             <button
               type="button"
               className={`tiny-btn ${showFavoritesOnly ? 'active' : ''}`}
-              onClick={() => setShowFavoritesOnly((previous) => !previous)}
+              onClick={toggleFavoritesOnlyFilter}
               disabled={isBootLocked}
             >
               {showFavoritesOnly ? 'Favorites ON' : 'Favorites OFF'}
@@ -637,6 +950,31 @@ function App() {
 
           <div className="screen-content">
             <section className="list-pane">
+              {favoriteIds.length > 0 && (
+                <div className="favorite-overview">
+                  <span>Favorites:</span>
+                  <div className="favorite-overview-list">
+                    {favoritePokemon.map((favoritePokemonItem) => (
+                      <button
+                        key={favoritePokemonItem.id}
+                        type="button"
+                        className="favorite-overview-chip"
+                        onClick={() => {
+                          if (!favoritePokemonItem.pokemon) return
+                          openPokemonDetails(favoritePokemonItem.pokemon)
+                        }}
+                        disabled={isBootLocked || !favoritePokemonItem.pokemon}
+                      >
+                        #{String(favoritePokemonItem.id).padStart(4, '0')}{' '}
+                        {favoritePokemonItem.pokemon
+                          ? formatName(favoritePokemonItem.pokemon.name)
+                          : 'Loading...'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="pokemon-list" onScroll={handleListScroll}>
                 {filteredPokemon.map((pokemon) => {
                   const active = pokemonDetails?.id === pokemon.id
@@ -700,7 +1038,7 @@ function App() {
                 <button
                   type="button"
                   className="tiny-btn load-more-btn"
-                  onClick={loadMorePokemon}
+                  onClick={handleLoadMoreClick}
                   disabled={isBootLocked}
                 >
                   Load More
@@ -720,6 +1058,9 @@ function App() {
                       <strong>#{String(pokemonDetails.id).padStart(4, '0')}</strong>
                       <h2>{formatName(pokemonDetails.name)}</h2>
                       <p>{pokemonDetails.genus}</p>
+                      <p className="pokemon-type-line">
+                        {pokemonDetails.types.map((entry) => formatName(entry.type.name)).join(' / ')}
+                      </p>
                     </div>
                     <div className="browse-controls">
                       <button
@@ -753,7 +1094,7 @@ function App() {
                     <button
                       type="button"
                       className={`tiny-btn ${currentSprite === 'front' ? 'active' : ''}`}
-                      onClick={() => setCurrentSprite('front')}
+                      onClick={() => handleSpriteChange('front')}
                       disabled={isBootLocked}
                     >
                       Front
@@ -761,7 +1102,7 @@ function App() {
                     <button
                       type="button"
                       className={`tiny-btn ${currentSprite === 'back' ? 'active' : ''}`}
-                      onClick={() => setCurrentSprite('back')}
+                      onClick={() => handleSpriteChange('back')}
                       disabled={isBootLocked}
                     >
                       Back
@@ -769,13 +1110,18 @@ function App() {
                     <button
                       type="button"
                       className={`tiny-btn ${currentSprite === 'shiny' ? 'active' : ''}`}
-                      onClick={() => setCurrentSprite('shiny')}
+                      onClick={() => handleSpriteChange('shiny')}
                       disabled={isBootLocked}
                     >
                       Shiny
                     </button>
-                    <button type="button" className="tiny-btn" onClick={playCry} disabled={isBootLocked}>
-                      Cry
+                    <button
+                      type="button"
+                      className="tiny-btn"
+                      onClick={playCry}
+                      disabled={isBootLocked || cryCountdown > 0}
+                    >
+                      {cryCountdown > 0 ? `Cry (${cryCountdown})` : 'Cry'}
                     </button>
                     <button
                       type="button"
@@ -812,6 +1158,8 @@ function App() {
                     </div>
                   </div>
 
+                  <div className="detail-section-title">Attack Set</div>
+
                   <div className="stats-stack">
                     {pokemonDetails.stats.map((stat) => {
                       const percent = Math.min(100, Math.round((stat.base_stat / 255) * 100))
@@ -826,6 +1174,17 @@ function App() {
                         </div>
                       )
                     })}
+                  </div>
+
+                  <div className="detail-section-title">Moves</div>
+
+                  <div className="moves-list">
+                    {moveSet.map((move) => (
+                      <span key={move.name}>
+                        {move.name}
+                        {move.level !== null ? ` Lv${move.level}` : ''}
+                      </span>
+                    ))}
                   </div>
 
                   <div className="evolution-row">
