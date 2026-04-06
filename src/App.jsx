@@ -85,6 +85,18 @@ const getEnglishGenus = (speciesData) => {
   return englishGenus?.genus || 'Pokemon'
 }
 
+const isTypingTarget = (target) => {
+  if (!target || !(target instanceof HTMLElement)) return false
+
+  const tagName = target.tagName
+  return (
+    target.isContentEditable ||
+    tagName === 'INPUT' ||
+    tagName === 'TEXTAREA' ||
+    tagName === 'SELECT'
+  )
+}
+
 function App() {
   const [allPokemonList, setAllPokemonList] = useState([])
   const [displayedPokemon, setDisplayedPokemon] = useState([])
@@ -734,6 +746,10 @@ function App() {
     if (!pokemonDetails || isBootLocked) return
 
     const onKeydown = (event) => {
+      if (isTypingTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) {
+        return
+      }
+
       if (event.key === 'ArrowLeft') {
         event.preventDefault()
         browseDetail(-1)
@@ -828,7 +844,7 @@ function App() {
     setCryCooldownUntil(Date.now() + 2000)
 
     const audio = new Audio(cryUrl)
-    audio.volume = 0.22
+    audio.volume = 0.12
     audio.play().catch(() => {})
   }
 
@@ -937,7 +953,7 @@ function App() {
             <span>Loaded: {displayedPokemon.length}</span>
             <span>Visible: {filteredPokemon.length}</span>
             <span>Fav: {favoriteIds.length}</span>
-            <span>Keys: /, Left/Right, F</span>
+            <span>Keys: /, &larr;/&rarr;, F</span>
           </div>
 
           {(isInitialLoading || isSearching) && (
