@@ -746,6 +746,19 @@
   transition: width 220ms ease;
 }
 
+@media (max-height: 900px) and (min-width: 681px) {
+  .pokedex-app {
+    margin: clamp(20px, 4vh, 52px) auto 14px;
+  }
+
+  .list-pane,
+  .detail-pane {
+    min-height: 440px;
+    height: 440px;
+    max-height: 440px;
+  }
+}
+
 @media (max-width: 1000px) {
   .screen-toolbar {
     grid-template-columns: 1fr 1fr 1fr;
